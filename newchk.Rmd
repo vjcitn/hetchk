@@ -1,0 +1,195 @@
+---
+title: "Simulation of heterogenous correlation: effects on inference in mixed effects modeling"
+author: "Vincent J. Carey, stvjc at channing.harvard.edu"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+vignette: >
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteIndexEntry{Simulation of heterogeneous correlation: effects on inference in mixed effects modeling}
+  %\VignetteEncoding{UTF-8}
+output:
+  BiocStyle::html_document:
+    highlight: pygments
+    number_sections: yes
+    theme: united
+    toc: yes
+---
+
+# Introduction; model
+
+In a certain study of methylation patterns in COPD, longitudinal
+data on methylation patterns in blood
+are collected in a complex design.  For a fraction
+of participants, samples from two time points are
+assayed on a single chip.  For the other participants,
+the samples from the time points are assayed on
+different chips.
+
+We will use a very simple setup based on bivariate
+Gaussian responses with different means and correlation
+coefficients to reflect this design.  We assume
+the two groups of donors are each of size $N$, and that
+the pairs of observations are obtained at common
+times denoted 0 and 1.
+
+Donors in group 1 produce samples according to
+$$
+Y_i \sim N_2((0,0)^t, 1, \rho_{11}),
+$$
+using the notation $N_2(\mu, \sigma^2, \rho)$
+to denote the bivariate Gaussian distribution with
+mean vector $\mu$, variance $\sigma^2$ and correlation coefficient $\rho$.
+
+Donors in group 2 produce samples according to
+$$
+Y_i \sim N_2((0,b)^t, 1, \rho_{12}).
+$$
+Both $\rho_{11}$ and $\rho_{12}$ must lie in $[0,1)$.
+
+The parameter of interest is $b$, the difference
+in mean response between
+groups 1 and 2 arising from the passage of one unit of time.
+
+# Simulation setup
+
+We will assess various modeling approaches via simulation.
+We can easily simulate from the models defined above.
+
+We will show that fitting a misspecified model in
+which the group-specific intrapair correlations
+are assumed common when in fact they are not
+leads to a loss of power.
+
+## Code
+
+We'll use MASS to generate multivariate normal
+deviates, and nlme to fit mixed effects models.
+```{r setup,message=FALSE}
+library(MASS)
+library(nlme)
+```
+
+This function produces the $p$-value for the test of $H_0: b = 0$,
+using a random intercept with common variance to capture
+longitudinal dependence.
+
+```{r dofun}
+simdat1 = function(N=100, b=0, r11=.6, r12=.6) {
+
+# set up correlation matrices
+ cm1 = matrix(c(1,r11,r11,1),nc=2)
+ cm2 = matrix(c(1,r12,r12,1),nc=2)
+
+# simulate residuals
+ S1 = as.numeric(t(mvrnorm(N, c(0,0), Sig=cm1)))
+ S2 = as.numeric(t(mvrnorm(N, c(0,0), Sig=cm2)))
+
+# set up ID and time variables, and group indicator
+ ids = rep(seq_len(2*N),each=2)
+ grp = rep(c(0,1),each=2*N)
+ time = rep(c(0,1),2*N)
+
+# define responses: S1 has mean 0, S2 has mean b*time
+ dat = data.frame(Y=c(S1,S2+b*time[seq_len(2*N)]), id=ids, time=time, grp=grp)
+ dat
+}
+ 
+# extract p-value for Ho: b=0
+sim1lme = function(dat) {
+ mod = lme(Y~time, random=~1|id, data=dat)
+ pint = summary(mod)$tTable[2,5]
+ list(mod=mod, pint=pint)
+}
+
+sim1 = function(N=100, b=0, r11=.6, r12=.6) {
+ d = simdat1(N, b, r11, r12)
+ sim1lme(d)
+}
+```
+
+## Some sanity checks
+
+This shows that the code captures the $p$-value of interest.
+
+```{r chk1}
+set.seed(123)
+f1 = sim1()
+summary(f1$mod)
+f1$pint
+```
+
+When $b$ is fixed at zero, the rejection rate based on $p<0.05$
+is as expected.
+
+```{r lksim}
+set.seed(123)
+library(parallel)
+options(mc.cores=6)
+```
+
+```{r lkss,cache=TRUE}
+nn = unlist(mclapply(seq_len(1500), function(x) sim1()$pint))
+mean(nn<0.05)
+```
+
+# Power curves for correctly specified and misspecified mixed effects models
+
+For a range of values of $b$, we will plot the rejection
+frequencies over 1500 realizations of the model
+with $\rho_{12} = $\rho_{11} = 0.6$.
+
+```{r dopow66, cache=TRUE}
+bs = seq(0,.5,.05)
+pows_66 = lapply(bs,
+ function(b) 
+   unlist(mclapply(seq_len(1500), function(x) sim1(b=b, r11=.6, r12=.6)$pint))
+ )
+plot(bs,unlist(sapply(pows_66, function(x) mean(x<0.05))),xlab="b", ylab="power with N=100 per group",
+  main = "common rho = .6")
+```
+
+Now set $\rho_{12} = 0.2$.
+
+```{r dopow62, cache=TRUE}
+pows_62 = lapply(bs,
+ function(b) 
+   unlist(mclapply(seq_len(1500), function(x) sim1(b=b, r11=.6, r12=.2)$pint))
+ )
+plot(bs,unlist(sapply(pows_62, function(x) mean(x<0.05))),xlab="b", ylab="power with N=100 per group",
+  main = "rho11 = .6, rho12 = .2")
+```
+
+Superimposing:
+
+```{r dobo}
+p66 = unlist(sapply(pows_66, function(x) mean(x<0.05)))
+p62 = unlist(sapply(pows_62, function(x) mean(x<0.05)))
+plot(bs, p66, type="l", lty=1)
+lines(bs, p62, lty=2)
+legend(0,.8, lty=c(1,2), legend=c("common", "heterogeneous"))
+```
+
+# Does adding a dummy variable help restore power?
+
+```{r lk1g}
+sim2lme = function(dat) {
+ mod = lme(Y~time+grp, random=~1|id, data=dat)
+ pint = summary(mod)$tTable[2,5]
+ list(mod=mod, pint=pint)
+}
+sim2 = function(N=100, b=0, r11=.6, r12=.6) {
+ d = simdat1(N, b, r11, r12)
+ sim2lme(d)
+}
+# type 1 err
+nn = unlist(mclapply(seq_len(1500), function(x) sim2()$pint))
+print(mean(nn<0.05))
+pows_62d = lapply(bs,
+ function(b) 
+   unlist(mclapply(seq_len(1500), function(x) sim2(b=b, r11=.6, r12=.2)$pint))
+ )
+p62d = unlist(sapply(pows_62d, function(x) mean(x<0.05)))
+plot(bs, p66, type="l", lty=1)
+lines(bs, p62, lty=2)
+lines(bs, p62d, lty=3)
+legend(0,.8, lty=c(1,2,3), legend=c("common", "heterogeneous", "dummy"))
+```
